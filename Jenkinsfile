@@ -141,8 +141,12 @@ pipeline {
   post {
     always {
       // Clean up the plan artifact reference but keep terraform's own .terraform
-      // dir cached on the agent (faster init next run).
-      sh 'rm -f infra/terraform/tfplan || true'
+      // dir cached on the agent (faster init next run). Wrapped in node{} so
+      // this still runs when an early failure (e.g. missing credential in the
+      // environment{} block) prevented the agent from being allocated.
+      node('built-in') {
+        sh 'rm -f infra/terraform/tfplan || true'
+      }
     }
     failure {
       echo 'Pipeline failed. Inspect the stage logs above; terraform state is left intact for the next run to resume.'
