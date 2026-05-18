@@ -1,0 +1,52 @@
+# Managed by Terraform — do not edit by hand.
+# Generated for cluster "${name}" (LXD container at ${ip}).
+#
+# Two-stage layout:
+#   tls_ready=false  →  HTTP-only, proxy directly. Used until certbot has
+#                       successfully obtained a cert for this domain.
+#   tls_ready=true   →  HTTP redirects to HTTPS (and still serves the ACME
+#                       challenge for renewals); HTTPS does the proxying.
+
+server {
+    listen 80;
+    listen [::]:80;
+    server_name ${subdomain};
+
+    # ACME HTTP-01 challenge — served from a webroot the host nginx and
+    # certbot share. Always present so renewals work without downtime.
+    location /.well-known/acme-challenge/ {
+        root /var/www/certbot;
+        try_files $$uri =404;
+    }
+
+%{ if tls_ready ~}
+    location / {
+        return 301 https://$$host$$request_uri;
+    }
+}
+
+server {
+    listen 443 ssl http2;
+    listen [::]:443 ssl http2;
+    server_name ${subdomain};
+
+    ssl_certificate     /etc/letsencrypt/live/${subdomain}/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/${subdomain}/privkey.pem;
+    ssl_protocols       TLSv1.2 TLSv1.3;
+    ssl_prefer_server_ciphers off;
+
+    # Location blocks live in /etc/nginx/snippets/${name}/. Terraform drops
+    # a catch-all proxy.location.conf here that forwards everything to the
+    # cluster's bridge IP, where Traefik handles path-based routing. Service
+    # deploy pipelines may also drop additional .location.conf files (e.g.
+    # ui.location.conf for per-service rate-limiting at the host nginx
+    # layer); nginx loads them all via this glob.
+    include /etc/nginx/snippets/${name}/*.location.conf;
+}
+%{ else ~}
+    # Pre-cert (HTTP-only) variant: same include pattern so a service deploy
+    # works even before certbot has issued a cert. Once the cert is on disk,
+    # this whole server{} is replaced by the redirect+HTTPS pair above.
+    include /etc/nginx/snippets/${name}/*.location.conf;
+}
+%{ endif ~}
