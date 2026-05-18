@@ -41,7 +41,6 @@ pipeline {
 
   options {
     timestamps()
-    ansiColor('xterm')
     timeout(time: 90, unit: 'MINUTES')
     disableConcurrentBuilds()    // serialize: terraform state is not concurrent-safe
   }
