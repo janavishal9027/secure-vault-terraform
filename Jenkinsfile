@@ -117,11 +117,10 @@ pipeline {
     }
 
     stage('Terraform apply') {
-      when {
-        // Auto-apply only on the develop branch — feature branches stop at plan.
-        // Remove this guard if you want every push to apply.
-        branch 'develop'
-      }
+      // Single-branch Pipeline job pointed at develop, so no branch guard
+      // needed. Switch to a Multibranch Pipeline and re-add
+      //   when { branch 'develop' }
+      // if you ever want feature branches to plan-only.
       steps {
         dir('infra/terraform') {
           sh 'sudo -E terraform apply tfplan'
@@ -130,7 +129,6 @@ pipeline {
     }
 
     stage('Smoke') {
-      when { branch 'develop' }
       steps {
         sh '''
           set -euo pipefail
