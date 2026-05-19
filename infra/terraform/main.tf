@@ -49,21 +49,15 @@ locals {
     if trimspace(s) != ""
   ]
 
-  # Stable IPs derived from cluster index — first cluster gets <network>.10,
-  # second .11, etc. Starts at .10 so .1 (gateway) and .2-.9 stay reserved
-  # for the host / future infra. Capped at .254 by the validation below.
-  #
-  # Pinning IPs (rather than letting lxdbr0's DHCP assign them) makes
-  # /etc/hosts entries on laptops, Tailscale subnet routes, and operator
-  # muscle memory stable across container recreates.
-  bridge_prefix = join(".", slice(split(".", split("/", var.bridge_cidr)[0]), 0, 3))
-
+  # IPs are NOT pinned. Each container omits ipv4.address on eth0 so
+  # lxdbr0's DHCP picks a free address from var.bridge_cidr on every
+  # (re)create. Downstream resources read it back via
+  # lxd_instance.digital_notes[k].ipv4_address.
   clusters_by_name = {
-    for idx, name in local.cluster_names :
+    for name in local.cluster_names :
     name => {
       cluster_name   = name
       container_name = "${var.application_name}-${name}"
-      ipv4_address   = "${local.bridge_prefix}.${10 + idx}"
       subdomain      = "${var.application_name}-${name}.${var.domain}"
     }
   }
@@ -73,14 +67,15 @@ locals {
   # to the cluster's bridge IP. Traefik inside k3s then does path-based
   # routing to the right K8s Service.
   #
-  # `ip` is the statically pinned address from clusters_by_name above —
-  # known at plan time, doesn't depend on the lxd_instance.
+  # `ip` is sourced from the lxd_instance's ipv4_address (DHCP-assigned by
+  # lxdbr0). "Known after apply" at plan time but Terraform handles the
+  # deferral correctly inside map values.
   vhosts = {
     for cluster_name, cluster in local.clusters_by_name :
     cluster_name => {
       cluster_name = cluster_name
       subdomain    = cluster.subdomain
-      ip           = cluster.ipv4_address
+      ip           = lxd_instance.digital_notes[cluster_name].ipv4_address
     }
   }
 }
@@ -133,17 +128,16 @@ resource "lxd_instance" "digital_notes" {
     EOF
   }
 
-  # Static IP per cluster (derived by index in locals.clusters_by_name), so
-  # /etc/hosts entries on laptops and Tailscale subnet routes stay stable
-  # across container recreates. LXD honors `ipv4.address` as a DHCP
-  # reservation tied to the container's MAC.
+  # No static ipv4.address — lxdbr0's DHCP picks a free address from
+  # var.bridge_cidr each time the container is created. The IP is reported
+  # back via lxd_instance.digital_notes[k].ipv4_address for downstream
+  # resources (vhosts, ufw rules) to consume.
   device {
     name = "eth0"
     type = "nic"
     properties = {
-      "name"         = "eth0"
-      "network"      = "lxdbr0"
-      "ipv4.address" = each.value.ipv4_address
+      "name"    = "eth0"
+      "network" = "lxdbr0"
     }
   }
 
