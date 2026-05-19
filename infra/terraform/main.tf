@@ -49,32 +49,22 @@ locals {
     if trimspace(s) != ""
   ]
 
-  # Per-cluster derived values. Each cluster gets:
-  #   - a container name `<application_name>-<cluster_name>`
-  #   - three FQDNs (auth/notes/ai) routed at its k3s/Traefik, prefixed with
-  #     the cluster name (e.g. auth-dev-a.<domain>).
+  # Stable IPs derived from cluster index — first cluster gets <network>.10,
+  # second .11, etc. Starts at .10 so .1 (gateway) and .2-.9 stay reserved
+  # for the host / future infra. Capped at .254 by the validation below.
   #
-  # IPs are NOT computed here. Each container omits `ipv4.address` on its
-  # eth0 device, so lxdbr0's DHCP server assigns a free address from
-  # var.bridge_cidr automatically. Downstream resources (host_ufw_allow,
-  # host_nginx_vhost) read the assigned IP back from
-  # lxd_instance.digital_notes[k].ipv4_address — that's a "known after
-  # apply" value, but Terraform handles the deferral correctly.
-  #
-  # Postgres no longer has a host-side proxy device. It listens on
-  # <container-ip>:5432, reachable from the VPS host (and any other
-  # LXD container) over the bridge. External pgAdmin connects via SSH
-  # tunnel.
+  # Pinning IPs (rather than letting lxdbr0's DHCP assign them) makes
+  # /etc/hosts entries on laptops, Tailscale subnet routes, and operator
+  # muscle memory stable across container recreates.
+  bridge_prefix = join(".", slice(split(".", split("/", var.bridge_cidr)[0]), 0, 3))
+
   clusters_by_name = {
-    for name in local.cluster_names :
+    for idx, name in local.cluster_names :
     name => {
       cluster_name   = name
       container_name = "${var.application_name}-${name}"
-      # ONE subdomain per cluster: <application>-<cluster>.<domain>. Traefik
-      # inside the cluster splits traffic to the 3 public services by URL
-      # path (/auth, /notes, /ai) — see the digital-notes-ingress ConfigMap
-      # the bootstrap script writes for the deploy pipeline to consume.
-      subdomain = "${var.application_name}-${name}.${var.domain}"
+      ipv4_address   = "${local.bridge_prefix}.${10 + idx}"
+      subdomain      = "${var.application_name}-${name}.${var.domain}"
     }
   }
 
@@ -83,15 +73,14 @@ locals {
   # to the cluster's bridge IP. Traefik inside k3s then does path-based
   # routing to the right K8s Service.
   #
-  # `ip` is sourced from the lxd_instance's ipv4_address (DHCP-assigned by
-  # lxdbr0). It's "known after apply" at plan time but Terraform tolerates
-  # unknown values inside map values (the keys are still concrete).
+  # `ip` is the statically pinned address from clusters_by_name above —
+  # known at plan time, doesn't depend on the lxd_instance.
   vhosts = {
     for cluster_name, cluster in local.clusters_by_name :
     cluster_name => {
       cluster_name = cluster_name
       subdomain    = cluster.subdomain
-      ip           = lxd_instance.digital_notes[cluster_name].ipv4_address
+      ip           = cluster.ipv4_address
     }
   }
 }
@@ -144,17 +133,17 @@ resource "lxd_instance" "digital_notes" {
     EOF
   }
 
-  # No static `ipv4.address` — lxdbr0's DHCP server picks a free address
-  # from var.bridge_cidr and assigns it on container start. The IP is then
-  # stable for the container's lifetime (LXD's DHCP issues long leases tied
-  # to the container's MAC). Downstream resources read it back via
-  # lxd_instance.digital_notes[k].ipv4_address.
+  # Static IP per cluster (derived by index in locals.clusters_by_name), so
+  # /etc/hosts entries on laptops and Tailscale subnet routes stay stable
+  # across container recreates. LXD honors `ipv4.address` as a DHCP
+  # reservation tied to the container's MAC.
   device {
     name = "eth0"
     type = "nic"
     properties = {
-      "name"    = "eth0"
-      "network" = "lxdbr0"
+      "name"         = "eth0"
+      "network"      = "lxdbr0"
+      "ipv4.address" = each.value.ipv4_address
     }
   }
 
