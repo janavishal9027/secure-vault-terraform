@@ -25,8 +25,9 @@ output "clusters" {
       cluster_name   = cluster.cluster_name
       container_name = lxd_instance.digital_notes[k].name
       ip             = lxd_instance.digital_notes[k].ipv4_address
-      postgres       = "${lxd_instance.digital_notes[k].ipv4_address}:5432"
-      subdomain      = cluster.subdomain
+      postgres_internal = "${lxd_instance.digital_notes[k].ipv4_address}:5432"
+      postgres_public   = "${cluster.subdomain}:5432"
+      subdomain         = cluster.subdomain
       service_urls = {
         auth  = "https://${cluster.subdomain}/auth"
         notes = "https://${cluster.subdomain}/notes"

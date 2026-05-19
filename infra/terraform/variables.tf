@@ -88,6 +88,17 @@ variable "cluster_names" {
   }
 }
 
+variable "postgres_password" {
+  description = "Postgres superuser password used inside every cluster's container. Set via Jenkins credential — DO NOT default. Public-internet-exposed Postgres requires a strong password."
+  type        = string
+  sensitive   = true
+
+  validation {
+    condition     = length(var.postgres_password) >= 16
+    error_message = "postgres_password must be at least 16 chars (Postgres is exposed on a public TCP port; weak passwords get brute-forced)."
+  }
+}
+
 variable "bridge_cidr" {
   description = "lxdbr0 subnet — must match BRIDGE_CIDR in the bootstrap script. Terraform doesn't carve IPs out of this range itself; lxdbr0's built-in DHCP server assigns each container a free address from this subnet automatically. The variable is kept here so the bootstrap-host.sh side can still see it via the pipeline."
   type        = string

@@ -32,6 +32,7 @@ REQUIRED_ENV_VARS=(
   APPLICATION_NAME
   CONTAINER_NAME
   CLUSTER_SUBDOMAIN
+  PG_PASSWORD
 )
 for v in "${REQUIRED_ENV_VARS[@]}"; do
   if [[ -z "${!v:-}" ]]; then
@@ -253,8 +254,13 @@ if command -v psql >/dev/null 2>&1; then
   if [[ -z "$pg_conf" || -z "$pg_hba" ]]; then
     echo "WARN: Postgres config files not found; skipping configuration" >&2
   else
-    do_ "setting postgres password = cluster name"
-    sudo -u postgres psql -c "ALTER USER postgres WITH PASSWORD '${CLUSTER_NAME}';" >/dev/null
+    do_ "setting postgres password from PG_PASSWORD"
+    # Use psql variables so the password isn't substituted by the shell into
+    # the SQL string (avoids quoting issues with special chars) and isn't
+    # echoed in `ps`.
+    sudo -u postgres PGPASSWORD_NEW="$PG_PASSWORD" \
+      psql -v new_pw="$PG_PASSWORD" \
+        -c "ALTER USER postgres WITH PASSWORD :'new_pw';" >/dev/null
 
     if grep -q "^listen_addresses = '\*'" "$pg_conf"; then
       skip "listen_addresses already '*'"
@@ -268,6 +274,34 @@ if command -v psql >/dev/null 2>&1; then
     else
       do_ "adding pg_hba md5 rule"
       echo "host all all 0.0.0.0/0 md5" >> "$pg_hba"
+    fi
+
+    # TLS for Postgres — required for the host-side nginx stream SNI
+    # routing (`null_resource.host_nginx_pg_stream`). pgAdmin connects with
+    # sslmode=require + sslnegotiation=direct, which sends a TLS ClientHello
+    # with SNI as the very first packet; the cert below is what Postgres
+    # then presents during the handshake. We use a self-signed cert with
+    # CN = subdomain because pgAdmin connects with sslmode=require, not
+    # verify-full — SNI routing only needs the client to *send* the right
+    # name, not validate the cert.
+    pg_data_dir=$(dirname "$pg_conf")
+    if [[ ! -f "$pg_data_dir/server.crt" ]] || [[ ! -f "$pg_data_dir/server.key" ]]; then
+      do_ "generating self-signed TLS cert for postgres (CN=${CLUSTER_SUBDOMAIN})"
+      openssl req -new -x509 -days 3650 -nodes \
+        -subj "/CN=${CLUSTER_SUBDOMAIN}" \
+        -addext "subjectAltName=DNS:${CLUSTER_SUBDOMAIN}" \
+        -out "$pg_data_dir/server.crt" \
+        -keyout "$pg_data_dir/server.key" >/dev/null 2>&1
+      chown postgres:postgres "$pg_data_dir/server.crt" "$pg_data_dir/server.key"
+      chmod 600 "$pg_data_dir/server.key"
+    else
+      skip "server.crt / server.key already present"
+    fi
+
+    if ! grep -q "^ssl = on" "$pg_conf"; then
+      do_ "enabling ssl in postgresql.conf"
+      sed -i "s/^#\?ssl\s*=.*/ssl = on/" "$pg_conf"
+      grep -q "^ssl = on" "$pg_conf" || echo "ssl = on" >> "$pg_conf"
     fi
 
     do_ "restarting postgresql"

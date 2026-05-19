@@ -150,7 +150,10 @@ resource "lxd_instance" "digital_notes" {
     }
   }
 
-  # Postgres listens at <container-ip>:5432 on the lxdbr0 bridge. Not
+  # Public Postgres exposure is handled at the host level via nginx stream +
+  # SNI preread on port 5432 (see null_resource.host_nginx_pg_stream) so each
+  # cluster's traffic is routed by subdomain, not by port. Postgres listens
+  # at <container-ip>:5432 on lxdbr0. Not
   # exposed on the public internet — laptops reach it via Tailscale, which
   # advertises 10.86.216.0/24 as a subnet route from this VPS.
 
@@ -248,6 +251,130 @@ resource "null_resource" "host_ufw_allow" {
 }
 
 # ---------------------------------------------------------------------------
+# Open the per-cluster Postgres host ports in ufw so pgAdmin from a laptop
+# can reach <vps_public_ip>:<pg_host_port>. One rule per cluster keeps
+# the ufw status output self-describing.
+# ---------------------------------------------------------------------------
+
+resource "null_resource" "host_ufw_postgres" {
+  triggers = {
+    # Single shared rule; nothing per-cluster here anymore.
+    port = 5432
+  }
+
+  provisioner "local-exec" {
+    interpreter = ["bash", "-c"]
+    command = <<-EOT
+      set -euo pipefail
+      sudo ufw allow 5432/tcp comment "pg:sni-stream"
+      sudo ufw reload >/dev/null
+      echo "==> ufw: allow 5432/tcp (nginx stream SNI)"
+    EOT
+  }
+
+  provisioner "local-exec" {
+    when        = destroy
+    interpreter = ["bash", "-c"]
+    command = <<-EOT
+      set -euo pipefail
+      sudo ufw delete allow 5432/tcp >/dev/null 2>&1 || true
+      sudo ufw reload >/dev/null || true
+    EOT
+  }
+}
+
+# ---------------------------------------------------------------------------
+# nginx stream module on the VPS: listens on :5432, peeks at the TLS
+# ClientHello (`ssl_preread`), and proxies to the container matching the
+# SNI (= cluster subdomain). This is what makes
+# `secure-vault-dev-a.cntrlflix.com:5432` route to dev-a and
+# `secure-vault-prod.cntrlflix.com:5432` route to prod, even though both
+# names resolve to the same VPS IP.
+#
+# Requirements on the client side (pgAdmin "Parameters" tab):
+#   sslmode=require              (or stronger)
+#   sslnegotiation=direct        (TLS-first; otherwise SNI is not in the
+#                                 first packet and preread fails)
+# ---------------------------------------------------------------------------
+
+resource "null_resource" "host_nginx_pg_stream" {
+  triggers = {
+    sni_map = jsonencode({
+      for k, v in local.clusters_by_name :
+      v.subdomain => lxd_instance.digital_notes[k].ipv4_address
+    })
+  }
+
+  provisioner "local-exec" {
+    interpreter = ["bash", "-c"]
+    environment = {
+      SNI_MAP = self.triggers.sni_map
+    }
+    command = <<-EOT
+      set -euo pipefail
+
+      MAP_LINES=$(printf '%s' "$SNI_MAP" \
+        | python3 -c '
+import sys, json
+m = json.load(sys.stdin)
+for host, ip in m.items():
+    print(f"    {host} {ip}:5432;")
+')
+
+      STREAM_CONF=/etc/nginx/stream.d/postgres.conf
+      sudo mkdir -p /etc/nginx/stream.d
+
+      sudo tee "$STREAM_CONF" >/dev/null <<NGINX
+# Managed by terraform: SNI-based Postgres routing.
+map \$ssl_preread_server_name \$pg_backend {
+    default                       127.0.0.1:1;  # blackhole — unknown SNI
+$MAP_LINES
+}
+
+server {
+    listen 5432;
+    proxy_pass \$pg_backend;
+    ssl_preread on;
+    proxy_connect_timeout 5s;
+    proxy_timeout 1h;
+}
+NGINX
+
+      # Ensure nginx.conf has a top-level stream{} block that includes our
+      # config. Idempotent: only append if not already present.
+      if ! sudo grep -q 'include /etc/nginx/stream.d/\*.conf' /etc/nginx/nginx.conf; then
+        sudo tee -a /etc/nginx/nginx.conf >/dev/null <<'NGINX'
+
+# Managed by terraform: stream-level (L4) configs for non-HTTP protocols.
+stream {
+    include /etc/nginx/stream.d/*.conf;
+}
+NGINX
+      fi
+
+      sudo nginx -t
+      sudo systemctl reload nginx
+      echo "==> nginx stream: $${MAP_LINES}" | sed 's/^/    /'
+    EOT
+  }
+
+  provisioner "local-exec" {
+    when        = destroy
+    interpreter = ["bash", "-c"]
+    command = <<-EOT
+      set -euo pipefail
+      sudo rm -f /etc/nginx/stream.d/postgres.conf
+      sudo nginx -t && sudo systemctl reload nginx || true
+    EOT
+  }
+
+  depends_on = [
+    lxd_instance.digital_notes,
+    null_resource.cluster_bootstrap,
+  ]
+}
+
+# ---------------------------------------------------------------------------
 # Cluster bootstrap: install k3s + helm + Postgres+pgvector + Kafka inside
 # each LXD container by `lxc exec`-ing a resilient shell script. We keep
 # this OUT of cloud-init because cloud-init can't retry across apt-mirror
@@ -284,12 +411,13 @@ resource "null_resource" "cluster_bootstrap" {
   provisioner "local-exec" {
     interpreter = ["bash", "-c"]
     environment = {
-      LXD_CONTAINER    = self.triggers.container
-      SCRIPT_PATH      = "${path.module}/scripts/cluster-bootstrap.sh"
-      APPLICATION_NAME = var.application_name
-      CLUSTER_NAME     = each.value.cluster_name
-      CONTAINER_NAME   = each.value.container_name
+      LXD_CONTAINER     = self.triggers.container
+      SCRIPT_PATH       = "${path.module}/scripts/cluster-bootstrap.sh"
+      APPLICATION_NAME  = var.application_name
+      CLUSTER_NAME      = each.value.cluster_name
+      CONTAINER_NAME    = each.value.container_name
       CLUSTER_SUBDOMAIN = each.value.subdomain
+      PG_PASSWORD       = var.postgres_password
     }
     # Pass the identity/routing env vars through `lxc exec --env` so the
     # bootstrap script sees them. App secrets are NOT terraform's concern —
@@ -310,9 +438,10 @@ resource "null_resource" "cluster_bootstrap" {
           --env CLUSTER_NAME="$3" \
           --env CONTAINER_NAME="$4" \
           --env CLUSTER_SUBDOMAIN="$5" \
+          --env PG_PASSWORD="$7" \
           -- bash -s "$3" < "$6"
       ' _ "$LXD_CONTAINER" "$APPLICATION_NAME" "$CLUSTER_NAME" \
-          "$CONTAINER_NAME" "$CLUSTER_SUBDOMAIN" "$SCRIPT_PATH"
+          "$CONTAINER_NAME" "$CLUSTER_SUBDOMAIN" "$SCRIPT_PATH" "$PG_PASSWORD"
     EOT
   }
 

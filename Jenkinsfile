@@ -29,6 +29,7 @@ pipeline {
     // them automatically in log output.
     LXD_TRUST_PASSWORD = credentials('lxd-trust-password')
     LETSENCRYPT_EMAIL  = credentials('letsencrypt-email')
+    POSTGRES_PASSWORD  = credentials('postgres-password')
 
     // terraform-lxd talks to the local LXD socket via this host. Bound to
     // 127.0.0.1 by bootstrap-host.sh's ufw rules.
@@ -109,7 +110,8 @@ pipeline {
               -var cluster_names=${params.CLUSTER_NAMES} \\
               -var domain=${params.DOMAIN} \\
               -var letsencrypt_email=\$LETSENCRYPT_EMAIL \\
-              -var letsencrypt_staging=${params.LE_STAGING}
+              -var letsencrypt_staging=${params.LE_STAGING} \\
+              -var postgres_password=\$POSTGRES_PASSWORD
           """
         }
         archiveArtifacts artifacts: 'infra/terraform/tfplan', fingerprint: true
