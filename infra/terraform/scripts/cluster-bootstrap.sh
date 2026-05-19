@@ -32,7 +32,6 @@ REQUIRED_ENV_VARS=(
   APPLICATION_NAME
   CONTAINER_NAME
   CLUSTER_SUBDOMAIN
-  PG_PASSWORD
 )
 for v in "${REQUIRED_ENV_VARS[@]}"; do
   if [[ -z "${!v:-}" ]]; then
@@ -254,13 +253,10 @@ if command -v psql >/dev/null 2>&1; then
   if [[ -z "$pg_conf" || -z "$pg_hba" ]]; then
     echo "WARN: Postgres config files not found; skipping configuration" >&2
   else
-    do_ "setting postgres password from PG_PASSWORD"
-    # Use psql variables so the password isn't substituted by the shell into
-    # the SQL string (avoids quoting issues with special chars) and isn't
-    # echoed in `ps`.
-    sudo -u postgres PGPASSWORD_NEW="$PG_PASSWORD" \
-      psql -v new_pw="$PG_PASSWORD" \
-        -c "ALTER USER postgres WITH PASSWORD :'new_pw';" >/dev/null
+    do_ "setting postgres password = cluster name (${CLUSTER_NAME})"
+    sudo -u postgres psql \
+      -v new_pw="${CLUSTER_NAME}" \
+      -c "ALTER USER postgres WITH PASSWORD :'new_pw';" >/dev/null
 
     if grep -q "^listen_addresses = '\*'" "$pg_conf"; then
       skip "listen_addresses already '*'"

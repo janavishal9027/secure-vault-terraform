@@ -417,7 +417,6 @@ resource "null_resource" "cluster_bootstrap" {
       CLUSTER_NAME      = each.value.cluster_name
       CONTAINER_NAME    = each.value.container_name
       CLUSTER_SUBDOMAIN = each.value.subdomain
-      PG_PASSWORD       = var.postgres_password
     }
     # Pass the identity/routing env vars through `lxc exec --env` so the
     # bootstrap script sees them. App secrets are NOT terraform's concern —
@@ -438,10 +437,9 @@ resource "null_resource" "cluster_bootstrap" {
           --env CLUSTER_NAME="$3" \
           --env CONTAINER_NAME="$4" \
           --env CLUSTER_SUBDOMAIN="$5" \
-          --env PG_PASSWORD="$7" \
           -- bash -s "$3" < "$6"
       ' _ "$LXD_CONTAINER" "$APPLICATION_NAME" "$CLUSTER_NAME" \
-          "$CONTAINER_NAME" "$CLUSTER_SUBDOMAIN" "$SCRIPT_PATH" "$PG_PASSWORD"
+          "$CONTAINER_NAME" "$CLUSTER_SUBDOMAIN" "$SCRIPT_PATH"
     EOT
   }
 
