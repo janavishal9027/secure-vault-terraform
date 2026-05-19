@@ -61,6 +61,20 @@ timeout 120 cloud-init status --wait >/dev/null 2>&1 || true
 do_ "cloud-init reached terminal state (or 120s timeout)"
 
 # ---------------------------------------------------------------------------
+# psql client — installed on the container OS so operators can `lxc exec`
+# into the container and connect to the in-cluster Postgres without going
+# through `kubectl exec`. Idempotent: skip if already present.
+# ---------------------------------------------------------------------------
+log "Checking psql client"
+if command -v psql >/dev/null 2>&1; then
+  skip "psql already installed ($(psql --version))"
+else
+  do_ "installing postgresql-client"
+  DEBIAN_FRONTEND=noninteractive apt-get update -qq
+  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq postgresql-client
+fi
+
+# ---------------------------------------------------------------------------
 # k3s — installed FIRST since it only needs curl and can't be blocked by
 # apt mirror flakiness. Retries on transient failures (e.g. get.k3s.io
 # briefly unreachable).
