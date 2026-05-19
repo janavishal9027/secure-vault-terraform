@@ -53,16 +53,14 @@ pipeline {
     }
 
     stage('Preflight') {
+      // Minimal checks that must pass before we even attempt bootstrap.
+      // Terraform/lxc version checks moved to the post-bootstrap stage
+      // because bootstrap-host.sh is what installs them.
       steps {
         sh '''
           set -euo pipefail
-          echo "==> versions"
-          terraform version
-          sudo lxc version | head -5
           echo "==> sudo without password works"
           sudo -n true
-          echo "==> snap bin on PATH under sudo"
-          sudo bash -c 'command -v lxc'
         '''
       }
     }
@@ -70,11 +68,24 @@ pipeline {
     stage('Bootstrap host (idempotent)') {
       steps {
         // Re-runs every build; each step in the script probes state and
-        // skips work already done. Cheap to invoke, catches drift.
+        // skips work already done. Installs terraform + lxd if missing.
         sh '''
           set -euo pipefail
           sudo LXD_TRUST_PASSWORD="$LXD_TRUST_PASSWORD" \\
                bash scripts/bootstrap-host.sh
+        '''
+      }
+    }
+
+    stage('Verify tooling') {
+      steps {
+        sh '''
+          set -euo pipefail
+          echo "==> versions"
+          terraform version
+          sudo lxc version | head -5
+          echo "==> snap bin on PATH under sudo"
+          sudo bash -c 'command -v lxc'
         '''
       }
     }
