@@ -195,34 +195,18 @@ EOF
 do_ "configmap/digital-notes-ingress applied"
 
 # ---------------------------------------------------------------------------
-# Postgres 17 + pgvector — apt-installed on the container OS from the PGDG
-# repo (Ubuntu 22.04 ships PG14; we need PG17 because it supports "direct
-# TLS" connections, which the host-side HAProxy needs to read SNI from
-# the very first packet and route to the right cluster.
-#
-# TLS is configured per-cluster with a self-signed cert whose CN matches
-# the cluster's subdomain. pgAdmin must connect with sslmode=require and
-# sslnegotiation=direct.
+# Postgres + pgvector — apt-installed on the container OS. Listens on the
+# bridge IP at :5432. No TLS, no public exposure: the only way to reach
+# this socket from outside the VPS is via Tailscale (the VPS advertises
+# 10.86.216.0/24 to the tailnet), and tailnet traffic is itself encrypted
+# end-to-end. pgAdmin connects to <subdomain>:5432 where the subdomain
+# resolves (via local /etc/hosts or Tailscale MagicDNS) to 10.86.216.x.
 # ---------------------------------------------------------------------------
-log "Checking PGDG apt repo"
-if [[ -f /etc/apt/sources.list.d/pgdg.list ]] \
-   && [[ -s /usr/share/keyrings/postgresql-archive-keyring.gpg ]]; then
-  skip "PGDG repo already configured"
+log "Checking Postgres"
+if command -v psql >/dev/null 2>&1 && systemctl is-enabled postgresql >/dev/null 2>&1; then
+  skip "postgres already installed ($(psql --version))"
 else
-  do_ "installing PGDG keyring + apt list"
-  curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
-    | gpg --dearmor -o /usr/share/keyrings/postgresql-archive-keyring.gpg
-  codename=$(lsb_release -cs)
-  echo "deb [signed-by=/usr/share/keyrings/postgresql-archive-keyring.gpg] https://apt.postgresql.org/pub/repos/apt ${codename}-pgdg main" \
-    > /etc/apt/sources.list.d/pgdg.list
-fi
-
-log "Checking Postgres 17"
-if command -v psql >/dev/null 2>&1 \
-   && psql --version | grep -q "psql (PostgreSQL) 17"; then
-  skip "postgres 17 already installed ($(psql --version))"
-else
-  do_ "installing postgresql-17 + postgresql-17-pgvector (apt with retries)"
+  do_ "installing postgres + postgresql-contrib (apt with retries)"
   apt_ok=false
   for i in 1 2 3 4 5; do
     if DEBIAN_FRONTEND=noninteractive apt-get update \
@@ -240,54 +224,28 @@ else
     echo "WARN: apt-get update failed after 5 attempts; skipping postgres install" >&2
   elif ! DEBIAN_FRONTEND=noninteractive apt-get install -y \
          -o Acquire::Retries=10 \
-         postgresql-17 postgresql-17-pgvector openssl; then
+         postgresql postgresql-contrib; then
     echo "WARN: postgres install failed; skipping postgres config" >&2
   fi
 fi
 
-# ---------------------------------------------------------------------------
-# Postgres config — only runs if psql is actually available.
-# Password = cluster name. Listen on all interfaces. TLS enabled with a
-# self-signed cert whose CN = subdomain. pg_hba accepts md5 from anywhere
-# (the host's HAProxy + ufw is the real perimeter).
-# ---------------------------------------------------------------------------
 if command -v psql >/dev/null 2>&1; then
-  log "Configuring Postgres 17"
-  pg_dir=$(ls -d /etc/postgresql/17/main 2>/dev/null || true)
-  pg_conf="${pg_dir}/postgresql.conf"
-  pg_hba="${pg_dir}/pg_hba.conf"
+  log "Configuring Postgres"
+  pg_conf=$(ls /etc/postgresql/*/main/postgresql.conf 2>/dev/null | head -1 || true)
+  pg_hba=$(ls /etc/postgresql/*/main/pg_hba.conf 2>/dev/null | head -1 || true)
 
-  if [[ -z "$pg_dir" || ! -f "$pg_conf" ]]; then
-    echo "WARN: PG17 config dir not found; skipping configuration" >&2
+  if [[ -z "$pg_conf" || -z "$pg_hba" ]]; then
+    echo "WARN: Postgres config files not found; skipping configuration" >&2
   else
-    # Self-signed TLS cert with CN = subdomain. Regenerate only if missing
-    # or if the existing cert's CN doesn't match the current subdomain.
-    cert_file="${pg_dir}/server.crt"
-    key_file="${pg_dir}/server.key"
-    current_cn=""
-    if [[ -f "$cert_file" ]]; then
-      current_cn=$(openssl x509 -in "$cert_file" -noout -subject 2>/dev/null \
-        | sed -n 's/.*CN *= *\([^ ,/]*\).*/\1/p')
-    fi
-    if [[ "$current_cn" != "$CLUSTER_SUBDOMAIN" ]]; then
-      do_ "generating self-signed TLS cert for CN=${CLUSTER_SUBDOMAIN}"
-      openssl req -new -x509 -days 3650 -nodes \
-        -out "$cert_file" \
-        -keyout "$key_file" \
-        -subj "/CN=${CLUSTER_SUBDOMAIN}" \
-        -addext "subjectAltName=DNS:${CLUSTER_SUBDOMAIN}" >/dev/null 2>&1
-      chown postgres:postgres "$cert_file" "$key_file"
-      chmod 0600 "$key_file"
-      chmod 0644 "$cert_file"
-    else
-      skip "TLS cert CN already matches ${CLUSTER_SUBDOMAIN}"
-    fi
+    do_ "setting postgres password = cluster name"
+    sudo -u postgres psql -c "ALTER USER postgres WITH PASSWORD '${CLUSTER_NAME}';" >/dev/null
 
-    do_ "ensuring listen_addresses = '*' and ssl = on"
-    sed -i "s/^#\?listen_addresses\s*=.*/listen_addresses = '*'/" "$pg_conf"
-    sed -i "s|^#\?ssl\s*=.*|ssl = on|" "$pg_conf"
-    sed -i "s|^#\?ssl_cert_file\s*=.*|ssl_cert_file = '${cert_file}'|" "$pg_conf"
-    sed -i "s|^#\?ssl_key_file\s*=.*|ssl_key_file = '${key_file}'|" "$pg_conf"
+    if grep -q "^listen_addresses = '\*'" "$pg_conf"; then
+      skip "listen_addresses already '*'"
+    else
+      do_ "setting listen_addresses = '*'"
+      sed -i "s/^#\?listen_addresses\s*=.*/listen_addresses = '*'/" "$pg_conf"
+    fi
 
     if grep -qF "host all all 0.0.0.0/0 md5" "$pg_hba"; then
       skip "pg_hba md5 rule already present"
@@ -296,23 +254,9 @@ if command -v psql >/dev/null 2>&1; then
       echo "host all all 0.0.0.0/0 md5" >> "$pg_hba"
     fi
 
-    do_ "setting postgres password = cluster name"
-    sudo -u postgres psql -c "ALTER USER postgres WITH PASSWORD '${CLUSTER_NAME}';" >/dev/null || \
-      systemctl start postgresql
-
     do_ "restarting postgresql"
     systemctl restart postgresql
 
-    # Wait for postgres to come back up after restart.
-    for i in 1 2 3 4 5 6 7 8 9 10; do
-      sudo -u postgres psql -c 'SELECT 1' >/dev/null 2>&1 && break
-      sleep 2
-    done
-
-    # Re-apply password now that the server is definitely up (idempotent).
-    sudo -u postgres psql -c "ALTER USER postgres WITH PASSWORD '${CLUSTER_NAME}';" >/dev/null
-
-    # Database + schema + pgvector extension (idempotent).
     if ! sudo -u postgres psql -tAc "SELECT 1 FROM pg_database WHERE datname='${PG_DB}'" | grep -q 1; then
       do_ "creating database ${PG_DB}"
       sudo -u postgres createdb "${PG_DB}"

@@ -243,14 +243,9 @@ ufw allow 80/tcp  >/dev/null
 ufw allow 443/tcp >/dev/null
 do_ "ufw 80/tcp + 443/tcp open for public reverse-proxy traffic"
 
-# Postgres: exposed publicly on host port 5432. A host-side HAProxy reads
-# the TLS SNI from each incoming connection and routes to the right
-# cluster's container. Per-cluster Postgres uses TLS with a self-signed
-# cert whose CN matches the subdomain. Clients MUST use sslmode=require
-# and sslnegotiation=direct (PG17 client feature) so the first packet is
-# a TLS ClientHello rather than a Postgres SSLRequest.
-ufw allow 5432/tcp >/dev/null
-do_ "ufw 5432/tcp open for HAProxy SNI-routed Postgres"
+# Postgres is NOT exposed on the public internet. Reach it from a laptop
+# via Tailscale: the VPS advertises 10.86.216.0/24 as a subnet route, so
+# `tailscale up` on the laptop makes 10.86.216.x directly reachable.
 
 if ufw status | grep -q "Status: active"; then
   if $forward_policy_changed; then
@@ -297,23 +292,42 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# HAProxy — fronts Postgres on host :5432. Terraform writes the actual
-# haproxy.cfg (it knows each cluster's bridge IP and subdomain); here we
-# only ensure the binary is installed and the unit is enabled. Terraform's
-# null_resource.host_haproxy_config drops in the config and reloads.
+# Tailscale — installs the binary and enables IP forwarding so this VPS
+# can act as a subnet router advertising 10.86.216.0/24 (the LXD bridge).
+# `tailscale up --advertise-routes=10.86.216.0/24` and the one-time admin
+# console approval are MANUAL steps performed by the operator:
+#
+#   sudo tailscale up --advertise-routes=10.86.216.0/24 \
+#                     --accept-routes
+#   # then in https://login.tailscale.com/admin/machines:
+#   #   - approve the subnet route on this machine
+#   #   - enable the route on any laptop that should reach 10.86.216.x
+#
+# We don't automate the `up` because it needs either an interactive login
+# or a Tailscale auth key, neither of which belong in apt-level bootstrap.
 # ---------------------------------------------------------------------------
-log "Checking HAProxy"
-if command -v haproxy >/dev/null 2>&1; then
-  skip "haproxy already installed ($(haproxy -v 2>/dev/null | head -1))"
+log "Checking Tailscale"
+if command -v tailscale >/dev/null 2>&1; then
+  skip "tailscale already installed ($(tailscale version | head -1))"
 else
-  do_ "apt-get install haproxy"
-  DEBIAN_FRONTEND=noninteractive apt-get install -y haproxy
+  do_ "installing tailscale from official apt repo"
+  curl -fsSL https://pkgs.tailscale.com/stable/debian/$(lsb_release -cs).noarmor.gpg \
+    | tee /usr/share/keyrings/tailscale-archive-keyring.gpg >/dev/null
+  curl -fsSL https://pkgs.tailscale.com/stable/debian/$(lsb_release -cs).tailscale-keyring.list \
+    | tee /etc/apt/sources.list.d/tailscale.list >/dev/null
+  apt-get update -qq
+  DEBIAN_FRONTEND=noninteractive apt-get install -y tailscale
 fi
-if systemctl is-enabled --quiet haproxy 2>/dev/null; then
-  skip "haproxy unit already enabled"
+
+# IP forwarding is required for Tailscale subnet routing (this VPS forwards
+# packets between the tailnet and the LXD bridge).
+sysctl_dropin=/etc/sysctl.d/99-tailscale.conf
+if [[ -f "$sysctl_dropin" ]] && grep -q "^net.ipv4.ip_forward = 1" "$sysctl_dropin"; then
+  skip "ipv4 forwarding already enabled via $sysctl_dropin"
 else
-  do_ "enabling haproxy (terraform writes the config)"
-  systemctl enable haproxy >/dev/null
+  do_ "enabling ipv4 forwarding for Tailscale subnet routing"
+  printf 'net.ipv4.ip_forward = 1\nnet.ipv6.conf.all.forwarding = 1\n' > "$sysctl_dropin"
+  sysctl -p "$sysctl_dropin" >/dev/null
 fi
 
 # ---------------------------------------------------------------------------
