@@ -254,9 +254,10 @@ if command -v psql >/dev/null 2>&1; then
     echo "WARN: Postgres config files not found; skipping configuration" >&2
   else
     do_ "setting postgres password = cluster name (${CLUSTER_NAME})"
+    # Direct interpolation is safe: var.cluster_names is validated by terraform
+    # to be ^[a-z0-9][a-z0-9-]{0,40}$ — no quotes, no shell metachars.
     sudo -u postgres psql \
-      -v new_pw="${CLUSTER_NAME}" \
-      -c "ALTER USER postgres WITH PASSWORD :'new_pw';" >/dev/null
+      -c "ALTER USER postgres WITH PASSWORD '${CLUSTER_NAME}';" >/dev/null
 
     if grep -q "^listen_addresses = '\*'" "$pg_conf"; then
       skip "listen_addresses already '*'"
