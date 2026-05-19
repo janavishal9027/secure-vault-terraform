@@ -61,20 +61,6 @@ timeout 120 cloud-init status --wait >/dev/null 2>&1 || true
 do_ "cloud-init reached terminal state (or 120s timeout)"
 
 # ---------------------------------------------------------------------------
-# psql client — installed on the container OS so operators can `lxc exec`
-# into the container and connect to the in-cluster Postgres without going
-# through `kubectl exec`. Idempotent: skip if already present.
-# ---------------------------------------------------------------------------
-log "Checking psql client"
-if command -v psql >/dev/null 2>&1; then
-  skip "psql already installed ($(psql --version))"
-else
-  do_ "installing postgresql-client"
-  DEBIAN_FRONTEND=noninteractive apt-get update -qq
-  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq postgresql-client
-fi
-
-# ---------------------------------------------------------------------------
 # k3s — installed FIRST since it only needs curl and can't be blocked by
 # apt mirror flakiness. Retries on transient failures (e.g. get.k3s.io
 # briefly unreachable).
@@ -209,63 +195,94 @@ EOF
 do_ "configmap/digital-notes-ingress applied"
 
 # ---------------------------------------------------------------------------
-# Postgres + pgvector — Bitnami chart deploys postgres as a StatefulSet
-# with a PVC. The Bitnami `postgresql` image ships with pgvector available;
-# the `digital-notes` database, the `secure-vault` schema, and the `vector`
-# extension are created by an init script the chart mounts on first start.
+# Postgres + pgvector — apt-installed on the container OS (not in k3s).
+# Operators can `psql` into it directly via `lxc exec` or an SSH tunnel to
+# the container IP:5432 without going through kubectl. The `secure-vault`
+# schema and `vector` extension are created post-install.
 #
-# We do NOT pass --set auth.postgresPassword. The Bitnami chart auto-
-# generates a strong password on first install and stores it in the
-# `postgres-postgresql` K8s Secret (key: `postgres-password`). Re-running
-# this script preserves the existing password (the chart reads back the
-# Secret on upgrade). The deploy pipeline reads that Secret to wire
-# DataSources for the 5 microservices.
+# Wraps apt-get update in a retry loop because Canonical mirrors are
+# occasionally flaky. If install fails after 5 attempts we log and continue
+# (k3s + Kafka alone are still a useful bring-up); a later re-apply retries.
 # ---------------------------------------------------------------------------
-log "Installing/upgrading Postgres+pgvector via helm"
-$KUBECTL apply -n "$NS" -f - >/dev/null <<EOF
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: postgres-init
-data:
-  00-init.sql: |
-    CREATE EXTENSION IF NOT EXISTS vector;
-    CREATE SCHEMA IF NOT EXISTS "${PG_SCHEMA}";
-    -- Future-proof: ensure pgvector is also visible from the schema search path.
-    ALTER DATABASE "${PG_DB}" SET search_path TO "${PG_SCHEMA}", public;
-EOF
+log "Checking Postgres"
+if command -v psql >/dev/null 2>&1 && systemctl is-enabled postgresql >/dev/null 2>&1; then
+  skip "postgres already installed ($(psql --version))"
+else
+  do_ "installing postgres + postgresql-contrib (apt with retries)"
+  apt_ok=false
+  for i in 1 2 3 4 5; do
+    if DEBIAN_FRONTEND=noninteractive apt-get update \
+         -o Acquire::Retries=10 \
+         -o Acquire::http::Timeout=30 \
+         -o Acquire::https::Timeout=30; then
+      apt_ok=true
+      break
+    fi
+    echo "    apt-get update attempt $i failed; sleeping 30s"
+    sleep 30
+  done
 
-# Retry the helm install up to 3 times. Under contention (multiple
-# clusters bootstrapping in parallel on a single VPS) the helm <-> k3s
-# API websocket can drop mid-`--wait` and surface as "websocket: close
-# 1006" or "context deadline exceeded". The chart is idempotent so a
-# retry just resumes from wherever it left off.
-pg_ok=false
-for i in 1 2 3; do
-  # See Kafka block below — same Bitnami → bitnamilegacy migration applies.
-  if helm upgrade --install postgres bitnami/postgresql \
-       -n "$NS" \
-       --set global.security.allowInsecureImages=true \
-       --set image.registry=docker.io \
-       --set image.repository=bitnamilegacy/postgresql \
-       --set auth.database="${PG_DB}" \
-       --set primary.initdb.scriptsConfigMap=postgres-init \
-       --set primary.persistence.size=4Gi \
-       --set primary.resources.requests.memory=256Mi \
-       --set primary.resources.requests.cpu=100m \
-       --set primary.resources.limits.memory=512Mi \
-       --wait --timeout 15m >/dev/null; then
-    pg_ok=true
-    break
+  if ! $apt_ok; then
+    echo "WARN: apt-get update failed after 5 attempts; skipping postgres install" >&2
+  elif ! DEBIAN_FRONTEND=noninteractive apt-get install -y \
+         -o Acquire::Retries=10 \
+         postgresql postgresql-contrib; then
+    echo "WARN: postgres install failed; skipping postgres config" >&2
   fi
-  echo "    postgres helm install attempt $i failed; sleeping 30s before retry" >&2
-  sleep 30
-done
-if ! $pg_ok; then
-  echo "ERROR: postgres helm install failed after 3 attempts" >&2
-  exit 1
 fi
-do_ "postgres release ready (password in secret/postgres-postgresql, key: postgres-password)"
+
+# ---------------------------------------------------------------------------
+# Postgres config — only runs if psql is actually available.
+# Password = cluster name (idempotent ALTER). Listen on all interfaces so
+# the LXD bridge IP serves connections; pg_hba allows md5 from anywhere
+# (the host's ufw is the real perimeter — only the bridge can reach 5432).
+# Creates the `digital-notes` database, `secure-vault` schema, and the
+# `vector` extension to match what the deploy pipeline expects.
+# ---------------------------------------------------------------------------
+if command -v psql >/dev/null 2>&1; then
+  log "Configuring Postgres"
+  pg_conf=$(ls /etc/postgresql/*/main/postgresql.conf 2>/dev/null | head -1 || true)
+  pg_hba=$(ls /etc/postgresql/*/main/pg_hba.conf 2>/dev/null | head -1 || true)
+
+  if [[ -z "$pg_conf" || -z "$pg_hba" ]]; then
+    echo "WARN: Postgres config files not found; skipping configuration" >&2
+  else
+    do_ "setting postgres password = cluster name"
+    sudo -u postgres psql -c "ALTER USER postgres WITH PASSWORD '${CLUSTER_NAME}';" >/dev/null
+
+    if grep -q "^listen_addresses = '\*'" "$pg_conf"; then
+      skip "listen_addresses already '*'"
+    else
+      do_ "setting listen_addresses = '*'"
+      sed -i "s/^#\?listen_addresses\s*=.*/listen_addresses = '*'/" "$pg_conf"
+    fi
+
+    if grep -qF "host all all 0.0.0.0/0 md5" "$pg_hba"; then
+      skip "pg_hba md5 rule already present"
+    else
+      do_ "adding pg_hba md5 rule"
+      echo "host all all 0.0.0.0/0 md5" >> "$pg_hba"
+    fi
+
+    do_ "restarting postgresql"
+    systemctl restart postgresql
+
+    # Database + schema + pgvector extension (idempotent).
+    if ! sudo -u postgres psql -tAc "SELECT 1 FROM pg_database WHERE datname='${PG_DB}'" | grep -q 1; then
+      do_ "creating database ${PG_DB}"
+      sudo -u postgres createdb "${PG_DB}"
+    else
+      skip "database ${PG_DB} already exists"
+    fi
+
+    do_ "ensuring schema ${PG_SCHEMA} and pgvector extension in ${PG_DB}"
+    sudo -u postgres psql -d "${PG_DB}" <<SQL >/dev/null
+CREATE EXTENSION IF NOT EXISTS vector;
+CREATE SCHEMA IF NOT EXISTS "${PG_SCHEMA}";
+ALTER DATABASE "${PG_DB}" SET search_path TO "${PG_SCHEMA}", public;
+SQL
+  fi
+fi
 
 # ---------------------------------------------------------------------------
 # Kafka — single broker, KRaft mode (no Zookeeper). Topics are created
