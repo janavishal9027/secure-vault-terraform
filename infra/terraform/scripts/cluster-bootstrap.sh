@@ -195,18 +195,31 @@ EOF
 do_ "configmap/digital-notes-ingress applied"
 
 # ---------------------------------------------------------------------------
-# Postgres + pgvector — apt-installed on the container OS. Listens on the
-# bridge IP at :5432. No TLS, no public exposure: the only way to reach
-# this socket from outside the VPS is via Tailscale (the VPS advertises
-# 10.86.216.0/24 to the tailnet), and tailnet traffic is itself encrypted
-# end-to-end. pgAdmin connects to <subdomain>:5432 where the subdomain
-# resolves (via local /etc/hosts or Tailscale MagicDNS) to 10.86.216.x.
+# Postgres 17 + pgvector — apt-installed on the container OS from the PGDG
+# repo (Ubuntu 22.04's default apt ships PG14; pgvector is also packaged by
+# PGDG as postgresql-17-pgvector). Listens on the bridge IP at :5432, no
+# public exposure — laptops reach it via Tailscale (VPS advertises
+# 10.86.216.0/24 to the tailnet, traffic is end-to-end encrypted by WireGuard).
 # ---------------------------------------------------------------------------
-log "Checking Postgres"
-if command -v psql >/dev/null 2>&1 && systemctl is-enabled postgresql >/dev/null 2>&1; then
-  skip "postgres already installed ($(psql --version))"
+log "Checking PGDG apt repo"
+if [[ -f /etc/apt/sources.list.d/pgdg.list ]] \
+   && [[ -s /usr/share/keyrings/postgresql-archive-keyring.gpg ]]; then
+  skip "PGDG repo already configured"
 else
-  do_ "installing postgres + postgresql-contrib (apt with retries)"
+  do_ "installing PGDG keyring + apt list"
+  curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+    | gpg --dearmor -o /usr/share/keyrings/postgresql-archive-keyring.gpg
+  codename=$(lsb_release -cs)
+  echo "deb [signed-by=/usr/share/keyrings/postgresql-archive-keyring.gpg] https://apt.postgresql.org/pub/repos/apt ${codename}-pgdg main" \
+    > /etc/apt/sources.list.d/pgdg.list
+fi
+
+log "Checking Postgres 17"
+if command -v psql >/dev/null 2>&1 \
+   && psql --version | grep -q "psql (PostgreSQL) 17"; then
+  skip "postgres 17 already installed ($(psql --version))"
+else
+  do_ "installing postgresql-17 + postgresql-17-pgvector (apt with retries)"
   apt_ok=false
   for i in 1 2 3 4 5; do
     if DEBIAN_FRONTEND=noninteractive apt-get update \
@@ -224,12 +237,15 @@ else
     echo "WARN: apt-get update failed after 5 attempts; skipping postgres install" >&2
   elif ! DEBIAN_FRONTEND=noninteractive apt-get install -y \
          -o Acquire::Retries=10 \
-         postgresql postgresql-contrib; then
+         postgresql-17 postgresql-contrib postgresql-17-pgvector; then
     echo "WARN: postgres install failed; skipping postgres config" >&2
   fi
 fi
 
+# `sudo -u postgres` from /root prints "could not change directory" warnings
+# (postgres user can't read /root). cd to /tmp first so the warnings go away.
 if command -v psql >/dev/null 2>&1; then
+  cd /tmp
   log "Configuring Postgres"
   pg_conf=$(ls /etc/postgresql/*/main/postgresql.conf 2>/dev/null | head -1 || true)
   pg_hba=$(ls /etc/postgresql/*/main/pg_hba.conf 2>/dev/null | head -1 || true)
