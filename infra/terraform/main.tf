@@ -167,12 +167,10 @@ resource "lxd_instance" "digital_notes" {
     }
   }
 
-  # Postgres is reachable at <container-ip>:5432 over the bridge. No host-
-  # side proxy device — each cluster has a unique bridge IP, so the
-  # standard 5432 port is fine and there's no port-collision math to track.
-  # External pgAdmin connects via SSH tunnel:
-  #   ssh -L 5432:<container-ip>:5432 <ssh_user>@<vps>
-  # then point pgAdmin at localhost:5432.
+  # Postgres is reachable at <container-ip>:5432 over the bridge, AND
+  # publicly at <subdomain>:5432 via the host-side HAProxy SNI router
+  # (see null_resource.host_haproxy_config). Clients must use TLS with
+  # sslmode=require and sslnegotiation=direct (PG17 direct-TLS feature).
 
   lifecycle {
     # Postgres data + Kafka topics live inside this container's filesystem.
@@ -653,4 +651,89 @@ resource "null_resource" "certbot_renew_dryrun" {
   }
 
   depends_on = [null_resource.host_nginx_vhost]
+}
+
+# ---------------------------------------------------------------------------
+# HAProxy SNI router for Postgres.
+#
+# Frontend listens on host :5432. Each incoming connection's first packet
+# is a TLS ClientHello (because clients use libpq's sslnegotiation=direct,
+# a PG17 feature), so HAProxy can read req.ssl_sni and pick a backend.
+# Each backend forwards (TLS-passthrough) to one cluster's container at
+# <bridge-ip>:5432, where Postgres terminates TLS with its own self-signed
+# cert.
+#
+# Triggers on the full cluster->ip map so adding/removing a cluster, or a
+# DHCP reassignment after a container recreate, rewrites the config.
+# ---------------------------------------------------------------------------
+
+resource "null_resource" "host_haproxy_config" {
+  triggers = {
+    # JSON-encode the {subdomain => ip} map so any change forces a rewrite.
+    cluster_map = jsonencode({
+      for k, c in local.clusters_by_name :
+      c.subdomain => lxd_instance.digital_notes[k].ipv4_address
+    })
+  }
+
+  provisioner "local-exec" {
+    interpreter = ["bash", "-c"]
+    environment = {
+      CLUSTER_MAP = self.triggers.cluster_map
+    }
+    command = <<-EOT
+      set -euo pipefail
+
+      cfg=$(mktemp)
+      cat > "$cfg" <<HAP
+      # Managed by Terraform — do not edit by hand.
+      global
+          log /dev/log local0
+          maxconn 4096
+          daemon
+
+      defaults
+          mode tcp
+          log global
+          option tcplog
+          timeout connect 5s
+          timeout client  1h
+          timeout server  1h
+
+      frontend pg_ingress
+          bind *:5432
+          tcp-request inspect-delay 5s
+          tcp-request content accept if { req.ssl_hello_type 1 }
+      HAP
+
+      # Emit a use_backend line per cluster, keyed by SNI.
+      python3 -c "
+      import json, os, sys
+      m = json.loads(os.environ['CLUSTER_MAP'])
+      for sub, ip in m.items():
+          name = sub.replace('.', '_').replace('-', '_')
+          print(f'    use_backend pg_{name} if {{ req.ssl_sni -i {sub} }}')
+      " >> "$cfg"
+
+      python3 -c "
+      import json, os, sys
+      m = json.loads(os.environ['CLUSTER_MAP'])
+      for sub, ip in m.items():
+          name = sub.replace('.', '_').replace('-', '_')
+          print(f'''
+      backend pg_{name}
+          server pg_{name} {ip}:5432''')
+      " >> "$cfg"
+
+      # Validate before swap so a typo can't take down 5432.
+      sudo haproxy -c -f "$cfg" >/dev/null
+      sudo install -o root -g root -m 0644 "$cfg" /etc/haproxy/haproxy.cfg
+      rm -f "$cfg"
+
+      sudo systemctl reload haproxy || sudo systemctl restart haproxy
+      echo "==> haproxy: SNI router reloaded"
+    EOT
+  }
+
+  depends_on = [lxd_instance.digital_notes]
 }

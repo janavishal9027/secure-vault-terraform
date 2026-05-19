@@ -19,14 +19,15 @@ output "cluster_names" {
 }
 
 output "clusters" {
-  description = "Per-cluster runtime info: container name, DHCP-assigned bridge IP (Postgres listens on this IP at port 5432), and the single public subdomain (<application>-<cluster>.<domain>). Traefik inside the cluster splits paths /auth, /notes, /ai to the right service."
+  description = "Per-cluster runtime info. `postgres_public` is what pgAdmin uses (TLS direct mode required: sslmode=require, sslnegotiation=direct). `postgres_internal` is the bridge address for in-host tooling."
   value = {
     for k, cluster in local.clusters_by_name : k => {
-      cluster_name   = cluster.cluster_name
-      container_name = lxd_instance.digital_notes[k].name
-      ip             = lxd_instance.digital_notes[k].ipv4_address
-      postgres       = "${lxd_instance.digital_notes[k].ipv4_address}:5432"
-      subdomain      = cluster.subdomain
+      cluster_name      = cluster.cluster_name
+      container_name    = lxd_instance.digital_notes[k].name
+      ip                = lxd_instance.digital_notes[k].ipv4_address
+      postgres_internal = "${lxd_instance.digital_notes[k].ipv4_address}:5432"
+      postgres_public   = "${cluster.subdomain}:5432"
+      subdomain         = cluster.subdomain
       service_urls = {
         auth  = "https://${cluster.subdomain}/auth"
         notes = "https://${cluster.subdomain}/notes"

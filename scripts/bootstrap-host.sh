@@ -243,16 +243,14 @@ ufw allow 80/tcp  >/dev/null
 ufw allow 443/tcp >/dev/null
 do_ "ufw 80/tcp + 443/tcp open for public reverse-proxy traffic"
 
-# Postgres: NOT exposed on the host's external interface. Each cluster's
-# Postgres listens at <container-ip>:5432 on the lxdbr0 bridge — reachable
-# from the host and from any LXD container, but not from the public
-# internet. External pgAdmin access goes through SSH tunneling:
-#   ssh -L 5432:<container-ip>:5432 <ssh_user>@<vps>
-# then point pgAdmin at localhost:5432.
-#
-# (The legacy ALLOWED_PG_IP / 15430:15439 range is intentionally not opened
-# here; the per-cluster LXD `proxy` device that needed it has been removed
-# from the terraform.)
+# Postgres: exposed publicly on host port 5432. A host-side HAProxy reads
+# the TLS SNI from each incoming connection and routes to the right
+# cluster's container. Per-cluster Postgres uses TLS with a self-signed
+# cert whose CN matches the subdomain. Clients MUST use sslmode=require
+# and sslnegotiation=direct (PG17 client feature) so the first packet is
+# a TLS ClientHello rather than a Postgres SSLRequest.
+ufw allow 5432/tcp >/dev/null
+do_ "ufw 5432/tcp open for HAProxy SNI-routed Postgres"
 
 if ufw status | grep -q "Status: active"; then
   if $forward_policy_changed; then
@@ -296,6 +294,26 @@ if command -v terraform >/dev/null 2>&1; then
 else
   do_ "apt-get install terraform"
   apt-get install -y terraform
+fi
+
+# ---------------------------------------------------------------------------
+# HAProxy — fronts Postgres on host :5432. Terraform writes the actual
+# haproxy.cfg (it knows each cluster's bridge IP and subdomain); here we
+# only ensure the binary is installed and the unit is enabled. Terraform's
+# null_resource.host_haproxy_config drops in the config and reloads.
+# ---------------------------------------------------------------------------
+log "Checking HAProxy"
+if command -v haproxy >/dev/null 2>&1; then
+  skip "haproxy already installed ($(haproxy -v 2>/dev/null | head -1))"
+else
+  do_ "apt-get install haproxy"
+  DEBIAN_FRONTEND=noninteractive apt-get install -y haproxy
+fi
+if systemctl is-enabled --quiet haproxy 2>/dev/null; then
+  skip "haproxy unit already enabled"
+else
+  do_ "enabling haproxy (terraform writes the config)"
+  systemctl enable haproxy >/dev/null
 fi
 
 # ---------------------------------------------------------------------------
