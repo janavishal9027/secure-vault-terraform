@@ -58,7 +58,15 @@ locals {
     name => {
       cluster_name   = name
       container_name = "${var.application_name}-${name}"
-      subdomain      = "${var.application_name}-${name}.${var.domain}"
+      # Production gets the bare apex-style host `<app>.<domain>` (e.g.
+      # secure-vault.cntrlflix.com); every other cluster keeps the
+      # `<app>-<cluster>.<domain>` form. Container name is unaffected — it
+      # stays `<app>-prod` so `lxc list` and k3s node names remain explicit.
+      subdomain = (
+        name == "prod"
+        ? "${var.application_name}.${var.domain}"
+        : "${var.application_name}-${name}.${var.domain}"
+      )
     }
   }
 
