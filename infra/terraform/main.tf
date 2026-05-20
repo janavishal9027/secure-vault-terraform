@@ -313,6 +313,17 @@ resource "null_resource" "host_nginx_pg_stream" {
     command = <<-EOT
       set -euo pipefail
 
+      # The `stream` directive is provided by a dynamic module on Ubuntu's
+      # nginx packaging. Without libnginx-mod-stream installed, nginx -t
+      # fails with `unknown directive "stream"`. Installing the package
+      # also drops an autoload entry in /etc/nginx/modules-enabled/, so no
+      # explicit load_module line is needed.
+      if ! nginx -V 2>&1 | grep -q -- '--with-stream' \
+         && [ ! -f /usr/lib/nginx/modules/ngx_stream_module.so ]; then
+        sudo apt-get update -o Acquire::Retries=5
+        sudo DEBIAN_FRONTEND=noninteractive apt-get install -y libnginx-mod-stream
+      fi
+
       MAP_LINES=$(printf '%s' "$SNI_MAP" \
         | python3 -c '
 import sys, json
