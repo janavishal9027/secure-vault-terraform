@@ -1,5 +1,4 @@
 # secure-vault-terraform
-
 Secure-Vault-Terraform repository is an Infrastructure-as-Code (IaC) platform designed to automatically provision, configure, and manage a complete multi-environment hosting infrastructure for the Secure Vault (Digital Notes) microservices application.
 Infrastructure-as-Code that provisions a complete **multi-environment hosting
 platform for the Digital Notes / secure-vault microservices backend** on a
@@ -12,7 +11,6 @@ Kafka inside it. The host VPS is the public front door: nginx terminates TLS
 and routes each request to the right container.
 
 ## Architecture
-
 ```
                 Internet
                    │
@@ -49,7 +47,6 @@ under the cluster's single public subdomain:
 | (internal)  | ai-worker        | —    | no — Kafka consumer |
 
 ### Naming
-
 - **Container:** `<application_name>-<cluster_name>` → `secure-vault-dev-a`
 - **Subdomain:** `<application_name>-<cluster_name>.<domain>` →
   `secure-vault-dev-a.cntrlflix.com`
