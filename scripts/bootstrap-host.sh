@@ -74,8 +74,10 @@ log "Checking apt prerequisites"
 # rsync          — used by the digi-banking-deploy-helm Bitbucket pipeline
 #                  to push the chart + values to this host before each helm
 #                  upgrade. Required on both ends of the rsync transfer.
+# git            — Jenkins checks out this repo on the host before running
+#                  terraform; also handy for manual ops on the VPS.
 need_pkgs=()
-for pkg in snapd wget gnupg lsb-release ufw ca-certificates python3 \
+for pkg in snapd wget git gnupg lsb-release ufw ca-certificates python3 \
            nginx gettext-base certbot python3-certbot-nginx rsync; do
   if ! dpkg -s "$pkg" >/dev/null 2>&1; then
     need_pkgs+=("$pkg")
