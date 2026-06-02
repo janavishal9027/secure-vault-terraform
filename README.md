@@ -1,9 +1,6 @@
 # secure-vault-terraform
 
-secure-vault-terraform repository is an Infrastructure-as-Code (IaC) platform designed to automatically provision, configure, and manage a complete multi-environment hosting infrastructure for the Secure Vault (Digital Notes) microservices application.
-
-# secure-vault-terraform
-
+Secure-Vault-Terraform repository is an Infrastructure-as-Code (IaC) platform designed to automatically provision, configure, and manage a complete multi-environment hosting infrastructure for the Secure Vault (Digital Notes) microservices application.
 Infrastructure-as-Code that provisions a complete **multi-environment hosting
 platform for the Digital Notes / secure-vault microservices backend** on a
 **single VPS**, using **LXD/LXC containers + Terraform**, driven by **Jenkins CI**.
