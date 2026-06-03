@@ -179,3 +179,47 @@ Follow the below commands:
 - root@srv1061621:/# cd scripts/
 - root@srv1061621:/scripts# sed -i 's/\r$//' install-jenkins.sh
 - root@srv1061621:/scripts# JENKINS_DOMAIN='jenkins.cntrlflix.com' \ LETSENCRYPT_EMAIL='YOUR_EMAIL_ID' \ bash install-jenkins.sh
+
+## How to recognize it's LE-side (not you):-
+
+Run the read-only diagnostics we used — if they come back clean, the problem is upstream and there's nothing local to fix:
+
+- env | grep -i proxy || echo "none"                                    # no proxy
+- curl -sS4 https://acme-v02.api.letsencrypt.org/directory -o /dev/null -w "%{http_code}\n"   # 200
+- curl -sS https://acme-v02.api.letsencrypt.org/directory | head -5     # genuine JSON
+- date -u && timedatectl | grep synchronized                            # clock synced
+
+If proxy=none, HTTP 200, genuine directory, clock synced → it's LE-side. Stop changing local config.
+
+## How to resolve it
+1. Check the status page first.
+
+- https://letsencrypt.status.io/ — shows active production incidents.
+If an incident is posted, there's literally nothing to do but wait for them to fix it.
+
+2. Retry with patience, not force. It's almost always transient (yours cleared within an hour). The right way:
+
+- Wait 5-15 minutes between attempts (not seconds).
+Re-run your normal command — for you that's just:
+- JENKINS_DOMAIN='jenkins.cntrlflix.com' LETSENCRYPT_EMAIL='you@example.com' bash install-jenkins.sh
+
+3. The things NOT to do (these turned a 10-minute wait into hours for you):
+
+- ❌ Don't rm -rf /etc/letsencrypt/accounts — it doesn't fix LE-side issues and destroys your account keys.
+- ❌ Don't hammer it in a tight loop — each registration burns toward the "10 new accounts / IP / 3 hours" limit, which can then block you when LE recovers.
+- ❌ Don't keep switching emails/flags hoping one works — it's not a config problem.
+
+4. Test against staging while you wait (proves your side is fine, zero rate-limit cost):
+
+- certbot certonly --webroot -w /var/www/certbot -d jenkins.cntrlflix.com \
+  --dry-run -v
+  
+If the dry-run succeeds (as yours did), you know it's only production being flaky — so just wait and retry production later.
+
+## Making it self-heal (so you don't babysit it)
+
+Your setup already handles this well:
+
+- install-jenkins.sh exits cleanly (not fatally) on cert failure and leaves the HTTP vhost up — re-runnable anytime.
+- certbot.timer (installed by bootstrap-host.sh) retries twice daily, so a transient failure during initial issuance gets retried automatically.
+- The Terraform per-cluster vhosts are best-effort too — a failed cert leaves an HTTP vhost and the next terraform apply promotes it once issuance succeeds.
