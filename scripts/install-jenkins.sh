@@ -50,6 +50,22 @@ skip() { printf '    skip: %s\n' "$*"; }
 do_()  { printf '    do:   %s\n' "$*"; }
 
 # ---------------------------------------------------------------------------
+# git — Jenkins needs the git CLI to check out this repo. It must exist
+# BEFORE the first build, and the pipeline's own bootstrap-host.sh can't
+# provide it (that runs only after checkout, which already needs git). So we
+# install it here, during host setup, where it's guaranteed to precede any
+# Jenkins job. Idempotent: skip if git is already on PATH.
+# ---------------------------------------------------------------------------
+log "Checking git"
+if command -v git >/dev/null 2>&1; then
+  skip "git $(git --version | awk '{print $3}') already installed"
+else
+  do_ "installing git"
+  apt-get update -qq
+  apt-get install -y -qq git
+fi
+
+# ---------------------------------------------------------------------------
 # Java — Jenkins LTS requires JDK 17 or 21. We use Temurin JDK 21 from the
 # Adoptium apt repo (the upstream Jenkins docs' recommended path on Ubuntu).
 # ---------------------------------------------------------------------------
