@@ -152,8 +152,26 @@ HTTP-only vhost and the next apply promotes it to HTTPS.
 - `disableConcurrentBuilds()` serializes runs — Terraform state is not
   concurrency-safe.
 
-## Installation of Jenkins in VPS(Hostinger)
-Path ---> root directory "/" ----> Create a script folder inside that folder place this "install-jenkins.sh" automachine code
+## Before installing the jenkins
+-certbot certificates shows "No certificates found" — so the cert from this morning is genuinely gone (the cert files and renewal config were removed at some point). That also confirms there are no other certbot-managed certs on this host yet — which actually makes the recovery command safe to run right now, because wiping the accounts dir can't break any other cert (there are none).
+
+So: just run the command, once by hand. Given the current clean-slate state, it's the right tool:
+
+echo "--- cli.ini (would override --staging) ---"
+cat /etc/letsencrypt/cli.ini 2>/dev/null || echo "(no cli.ini)"
+
+echo "--- leftover account state ---"
+ls -la /etc/letsencrypt/accounts/ 2>/dev/null || echo "(no accounts dir)"
+
+rm -rf /etc/letsencrypt/accounts
+
+certbot certonly --webroot -w /var/www/certbot \
+  -d jenkins.cntrlflix.com \
+  --non-interactive --agree-tos \
+  --email 'YOUR_EMAIL_ID' \
+  --dry-run -v
+
+## Installation commands
 
 Follow the below commands:
 
