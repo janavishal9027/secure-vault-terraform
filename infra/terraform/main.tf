@@ -321,13 +321,26 @@ resource "null_resource" "host_nginx_pg_stream" {
     command = <<-EOT
       set -euo pipefail
 
-      # The `stream` directive is provided by a dynamic module on Ubuntu's
-      # nginx packaging. Without libnginx-mod-stream installed, nginx -t
-      # fails with `unknown directive "stream"`. Installing the package
-      # also drops an autoload entry in /etc/nginx/modules-enabled/, so no
-      # explicit load_module line is needed.
-      if ! nginx -V 2>&1 | grep -q -- '--with-stream' \
-         && [ ! -f /usr/lib/nginx/modules/ngx_stream_module.so ]; then
+      # The `stream` directive needs the stream module *loaded*. On Debian/
+      # Ubuntu nginx is built with `--with-stream=dynamic`, so the build flag
+      # showing up in `nginx -V` does NOT mean the directive works — a dynamic
+      # module is inert until loaded, which the libnginx-mod-stream package
+      # handles (it ships the .so AND an autoload entry in
+      # /etc/nginx/modules-enabled/). Gating the install on the build flag
+      # alone (the old check) wrongly skipped the package on Debian, leaving
+      # `stream {}` an "unknown directive" and failing every later `nginx -t`.
+      #
+      # So we treat stream as ready only if it's EITHER statically compiled in
+      # (`--with-stream` not followed by `=`, e.g. `--with-stream ` or at line
+      # end) OR already autoloaded as a dynamic module. Otherwise install the
+      # package (idempotent: apt no-ops if it's already present).
+      stream_ready=false
+      if nginx -V 2>&1 | grep -qE -- '--with-stream([^=]|$)'; then
+        stream_ready=true   # statically compiled in
+      elif ls /etc/nginx/modules-enabled/ 2>/dev/null | grep -q stream; then
+        stream_ready=true   # dynamic module already autoloaded
+      fi
+      if ! $stream_ready; then
         sudo apt-get update -o Acquire::Retries=5
         sudo DEBIAN_FRONTEND=noninteractive apt-get install -y libnginx-mod-stream
       fi
