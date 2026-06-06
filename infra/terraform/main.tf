@@ -648,6 +648,14 @@ resource "null_resource" "host_nginx_vhost" {
         local content="$1"
         printf '%s' "$content" | sudo tee "$AVAIL" >/dev/null
         sudo ln -sf "$AVAIL" "$ENABLED"
+        # Defensive: a DANGLING symlink in sites-enabled (e.g. left by an older
+        # vhost naming scheme whose sites-available target was removed) makes
+        # `nginx -t` fail GLOBALLY — open() on the broken link returns ENOENT
+        # and aborts the whole config test, which would block this apply (and
+        # every future one) even though our own vhost is fine. A broken symlink
+        # is never valid config, so prune them before testing. `-xtype l`
+        # matches only links whose target is missing; live links are untouched.
+        sudo find /etc/nginx/sites-enabled -maxdepth 1 -xtype l -delete
         sudo nginx -t
         sudo systemctl reload nginx
       }
