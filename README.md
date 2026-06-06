@@ -67,8 +67,9 @@ under the cluster's single public subdomain:
 ## How it fits together
 
 1. **`install-jenkins.sh`** bootstraps the CI server on the VPS.
-2. Point Jenkins at this repo. On a push to **`develop`**, the
-   [Jenkinsfile](Jenkinsfile) pipeline runs.
+2. Point Jenkins at this repo, add the credentials + `LXD_HOST` env var (see
+   [CI (Jenkins)](#ci-jenkins)), then launch a **Build with Parameters** run,
+   supplying `APPLICATION_NAME`, `CLUSTER_NAMES`, and `DOMAIN`.
 3. The pipeline re-runs **`bootstrap-host.sh`** (idempotent) to ensure LXD,
    nginx, certbot, Terraform, etc. are present and configured.
 4. It then runs **`terraform apply`**, which creates/updates the LXD
@@ -141,14 +142,44 @@ HTTP-only vhost and the next apply promotes it to HTTPS.
   time. The Bitnami Postgres chart auto-generates the superuser password into
   the `<release>-postgresql` Secret.
 
-## CI triggers (Jenkins)
+## CI (Jenkins)
 
-- Single-branch Pipeline pointed at **`develop`** → automatic
-  `terraform apply` on push.
-- **Build with Parameters** lets you override `APPLICATION_NAME`,
-  `CLUSTER_NAMES`, `DOMAIN`, and `LE_STAGING`.
+The pipeline ([Jenkinsfile](Jenkinsfile)) runs **on the VPS itself** (all
+`local-exec`, no SSH) and is driven entirely by required inputs — nothing
+product-specific is baked into the code.
+
+### One-time Jenkins setup
+
+| Type | Name | Purpose |
+|------|------|---------|
+| Credential (Secret text) | `lxd-trust-password` | LXD `core.trust_password` for the provider. |
+| Credential (Secret text) | `letsencrypt-email` | Contact email for Let's Encrypt. |
+| Environment variable | `LXD_HOST` | LXD API host (typically `127.0.0.1`, since Terraform runs on the LXD host). Set under **Manage Jenkins → System → Global properties → Environment variables**. |
+
+### Running a build
+
+- Start deploys with **Build with Parameters**. There are **no pre-filled
+  defaults** — you must supply a value each run:
+  - `APPLICATION_NAME` — e.g. `secure-vault`
+  - `CLUSTER_NAMES` — e.g. `dev,test,prod` (comma-delimited; **append only** —
+    removing a name trips `prevent_destroy`)
+  - `DOMAIN` — e.g. `cntrlflix.com`
+  - `LE_STAGING` — boolean; `true` for Let's Encrypt staging while iterating.
+- The **Preflight** stage fails the build immediately (before any Terraform
+  runs) if `APPLICATION_NAME`, `CLUSTER_NAMES`, or `DOMAIN` is blank, or if the
+  `LXD_HOST` environment variable is unset.
+- Because the parameters have no defaults, an **automatic** trigger (e.g. a push
+  to `develop`) has nothing to fall back on and will stop at Preflight — deploys
+  are therefore intended to be launched manually via Build with Parameters.
 - `disableConcurrentBuilds()` serializes runs — Terraform state is not
   concurrency-safe.
+
+### Pipeline stages
+
+`Checkout → Preflight → Bootstrap host (idempotent) → Verify tooling →
+Terraform init → Terraform plan → Terraform apply → Smoke`. The plan stage
+passes the parameters/`LXD_HOST` into Terraform as `-var` flags; the apply
+stage runs the archived plan.
 
 ## Before installing the jenkins
 -certbot certificates shows "No certificates found" — so the cert from this morning is genuinely gone (the cert files and renewal config were removed at some point). That also confirms there are no other certbot-managed certs on this host yet — which actually makes the recovery command safe to run right now, because wiping the accounts dir can't break any other cert (there are none).
