@@ -14,12 +14,12 @@ pipeline {
   agent any
 
   parameters {
-    string(name: 'APPLICATION_NAME', defaultValue: 'secure-vault',
-           description: 'Logical app name; prefixes every container.')
-    string(name: 'CLUSTER_NAMES',    defaultValue: 'dev-a,dev-b,test,stage,prod',
-           description: 'Comma-delimited cluster list. APPEND only — removing names triggers prevent_destroy.')
-    string(name: 'DOMAIN',           defaultValue: 'cntrlflix.com',
-           description: 'Public DNS apex; per-cluster subdomain is <app>-<cluster>.<domain>.')
+    string(name: 'APPLICATION_NAME', defaultValue: '',
+           description: 'Logical app name; prefixes every container. Required (e.g. secure-vault).')
+    string(name: 'CLUSTER_NAMES',    defaultValue: '',
+           description: 'Comma-delimited cluster list (e.g. dev,test,prod). Required. APPEND only — removing names triggers prevent_destroy.')
+    string(name: 'DOMAIN',           defaultValue: '',
+           description: 'Public DNS apex (e.g. cntrlflix.com); per-cluster subdomain is <app>-<cluster>.<domain>. Required.')
     booleanParam(name: 'LE_STAGING', defaultValue: false,
            description: "Issue against Let's Encrypt staging (untrusted certs) while iterating.")
   }
@@ -30,9 +30,12 @@ pipeline {
     LXD_TRUST_PASSWORD = credentials('lxd-trust-password')
     LETSENCRYPT_EMAIL  = credentials('letsencrypt-email')
 
-    // terraform-lxd talks to the local LXD socket via this host. Bound to
-    // 127.0.0.1 by bootstrap-host.sh's ufw rules.
-    LXD_HOST = '127.0.0.1'
+    // LXD_HOST is NOT hardcoded here. It comes from a Jenkins-configured
+    // environment variable (Manage Jenkins -> System -> Global properties ->
+    // Environment variables, or a node/folder-level env var). terraform runs
+    // on the LXD host itself, so this is typically '127.0.0.1', but keeping
+    // it external means a different host/port can be set without editing code.
+    // Preflight fails the build if it's unset.
 
     TF_IN_AUTOMATION   = 'true'
     TF_INPUT           = '0'
@@ -57,6 +60,23 @@ pipeline {
       // Terraform/lxc version checks moved to the post-bootstrap stage
       // because bootstrap-host.sh is what installs them.
       steps {
+        // No defaults are pre-filled for APPLICATION_NAME / CLUSTER_NAMES /
+        // DOMAIN — the operator must supply them on every "Build with
+        // Parameters" run. Fail loud here if any are blank instead of letting
+        // empty `-var` values reach terraform and surface as a cryptic
+        // validation error mid-plan.
+        script {
+          ['APPLICATION_NAME', 'CLUSTER_NAMES', 'DOMAIN'].each { p ->
+            if (!params[p]?.trim()) {
+              error "Required parameter ${p} is empty. Use 'Build with Parameters' and provide a value."
+            }
+          }
+          // LXD_HOST is supplied via a Jenkins environment variable, not a
+          // build parameter. Fail loud if it wasn't configured.
+          if (!env.LXD_HOST?.trim()) {
+            error "LXD_HOST is not set. Configure it as a Jenkins environment variable (Manage Jenkins -> System -> Global properties -> Environment variables)."
+          }
+        }
         sh '''
           set -euo pipefail
           echo "==> sudo without password works"

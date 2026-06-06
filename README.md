@@ -5,7 +5,7 @@ platform for the Digital Notes / secure-vault microservices backend** on a
 **single VPS**, using **LXD/LXC containers + Terraform**, driven by **Jenkins CI**.
 
 One VPS hosts several isolated LXD containers — one per environment cluster
-(`dev-a`, `dev-b`, `test`, `stage`, `prod`). Each container runs a full
+(`dev`, `test`, `prod`). Each container runs a full
 **k3s** Kubernetes stack with all 5 microservices, plus Postgres+pgvector and
 Kafka inside it. The host VPS is the public front door: nginx terminates TLS
 and routes each request to the right container.
@@ -26,10 +26,8 @@ and routes each request to the right container.
         │  Tailscale                 (private PG access)│
         │                                              │
         │   lxdbr0 bridge — 10.86.216.0/24 (DHCP)      │
-        │    ├── secure-vault-dev-a                    │
-        │    ├── secure-vault-dev-b                    │
-        │    ├── secure-vault-test    each container = │
-        │    ├── secure-vault-stage   k3s + 5 services │
+        │    ├── secure-vault-dev     each container = │
+        │    ├── secure-vault-test    k3s + 5 services │
         │    └── secure-vault-prod    + Postgres+pgvector
         │                             + Kafka          │
         └──────────────────────────────────────────────┘
@@ -47,9 +45,9 @@ under the cluster's single public subdomain:
 | (internal)  | ai-worker        | —    | no — Kafka consumer |
 
 ### Naming
-- **Container:** `<application_name>-<cluster_name>` → `secure-vault-dev-a`
+- **Container:** `<application_name>-<cluster_name>` → `secure-vault-dev`
 - **Subdomain:** `<application_name>-<cluster_name>.<domain>` →
-  `secure-vault-dev-a.cntrlflix.com`
+  `secure-vault-dev.cntrlflix.com`
 - **Production** gets the bare apex form `<application_name>.<domain>` →
   `secure-vault.cntrlflix.com` (container name stays `secure-vault-prod`).
 
@@ -102,7 +100,7 @@ sudo -E terraform apply \
   -var lxd_host=127.0.0.1 \
   -var lxd_trust_password="$LXD_TRUST_PASSWORD" \
   -var application_name=secure-vault \
-  -var cluster_names=dev-a,dev-b,test,stage,prod \
+  -var cluster_names=dev,test,prod \
   -var domain=cntrlflix.com \
   -var letsencrypt_email=you@example.com \
   -var letsencrypt_staging=true   # flip to false for real certs
