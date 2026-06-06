@@ -82,6 +82,12 @@ locals {
     for cluster_name, cluster in local.clusters_by_name :
     cluster_name => {
       cluster_name = cluster_name
+      # App-namespaced vhost identity: "<app>-<cluster>" (e.g. secure-vault-dev).
+      # Drives the sites-available/-enabled filename AND the host-nginx snippet
+      # dir, so multiple apps sharing this VPS don't collide on a bare dev.conf /
+      # snippets/dev/. Equals each service deploy pipeline's KUBE_NAMESPACE, so
+      # the location snippets they drop land in the dir this vhost includes.
+      vhost_name   = cluster.container_name
       subdomain    = cluster.subdomain
       ip           = lxd_instance.digital_notes[cluster_name].ipv4_address
     }
@@ -563,7 +569,7 @@ resource "null_resource" "host_nginx_vhost" {
   # provisioner can swap between them at runtime (depending on whether the
   # cert already exists on disk).
   triggers = {
-    name      = each.value.cluster_name
+    name      = each.value.vhost_name
     subdomain = each.value.subdomain
 
     # Note: the template uses `$$` everywhere it wants nginx to see a literal
@@ -572,7 +578,7 @@ resource "null_resource" "host_nginx_vhost" {
     # we post-process to collapse `$$` to `$` before writing to disk.
     config_http = replace(
       templatefile("${path.module}/templates/nginx-vhost.conf.tftpl", {
-        name      = each.value.cluster_name
+        name      = each.value.vhost_name
         subdomain = each.value.subdomain
         ip        = each.value.ip
         tls_ready = false
@@ -582,7 +588,7 @@ resource "null_resource" "host_nginx_vhost" {
     )
     config_tls = replace(
       templatefile("${path.module}/templates/nginx-vhost.conf.tftpl", {
-        name      = each.value.cluster_name
+        name      = each.value.vhost_name
         subdomain = each.value.subdomain
         ip        = each.value.ip
         tls_ready = true
@@ -595,7 +601,7 @@ resource "null_resource" "host_nginx_vhost" {
     # processing as the vhost templates above.
     proxy_snippet = replace(
       templatefile("${path.module}/templates/proxy-location.conf.tftpl", {
-        name = each.value.cluster_name
+        name = each.value.vhost_name
         ip   = each.value.ip
       }),
       "$$",
