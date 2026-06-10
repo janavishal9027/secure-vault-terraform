@@ -423,15 +423,22 @@ NGINX
     when        = destroy
     interpreter = ["bash", "-c"]
     environment = {
-      APPLICATION_NAME = self.triggers.application_name
+      # `lookup` with a default tolerates pre-existing state objects created
+      # before `application_name` was added to triggers: on the first replace,
+      # the destroy step runs against that OLD state and the key is absent.
+      # Such an object never wrote a fragment anyway, so an empty value (guarded
+      # below) is the correct no-op.
+      APPLICATION_NAME = lookup(self.triggers, "application_name", "")
     }
     command = <<-EOT
       set -euo pipefail
       # Remove ONLY this app's fragment; the shared skeleton and other apps'
       # fragments stay intact. The skeleton is intentionally left in place even
       # when this is the last app — an empty wildcard include is valid nginx.
-      sudo rm -f "/etc/nginx/stream.d/pg-sni.d/$APPLICATION_NAME.map"
-      sudo nginx -t && sudo systemctl reload nginx || true
+      if [ -n "$APPLICATION_NAME" ]; then
+        sudo rm -f "/etc/nginx/stream.d/pg-sni.d/$APPLICATION_NAME.map"
+        sudo nginx -t && sudo systemctl reload nginx || true
+      fi
     EOT
   }
 
