@@ -313,6 +313,9 @@ resource "null_resource" "host_ufw_postgres" {
 
 resource "null_resource" "host_nginx_pg_stream" {
   triggers = {
+    # Stored in triggers (not read from var) so the destroy provisioner — which
+    # may only reference `self` — can remove exactly this app's fragment.
+    application_name = var.application_name
     sni_map = jsonencode({
       for k, v in local.clusters_by_name :
       v.subdomain => lxd_instance.digital_notes[k].ipv4_address
@@ -322,7 +325,8 @@ resource "null_resource" "host_nginx_pg_stream" {
   provisioner "local-exec" {
     interpreter = ["bash", "-c"]
     environment = {
-      SNI_MAP = self.triggers.sni_map
+      SNI_MAP          = self.triggers.sni_map
+      APPLICATION_NAME = self.triggers.application_name
     }
     command = <<-EOT
       set -euo pipefail
@@ -359,14 +363,33 @@ for host, ip in m.items():
     print(f"    {host} {ip}:5432;")
 ')
 
-      STREAM_CONF=/etc/nginx/stream.d/postgres.conf
+      # Multi-tenant layout. nginx permits only ONE map per variable and ONE
+      # listener per port, so the map + the :5432 server are a SHARED,
+      # app-independent skeleton. Each application contributes ONLY its own
+      # SNI->IP lines through a per-app fragment that the map `include`s. This
+      # lets several products (secure-vault, asr-solar, ...) share one VPS
+      # without one project's apply clobbering another's postgres.conf.
       sudo mkdir -p /etc/nginx/stream.d
+      SNI_FRAG_DIR=/etc/nginx/stream.d/pg-sni.d
+      sudo mkdir -p "$SNI_FRAG_DIR"
 
+      # This app's fragment: bare `host ip:5432;` lines, no map/server wrapper.
+      # It is included from inside the map block, NOT at stream{} top level, so
+      # it must live in pg-sni.d/ (outside the stream.d/*.conf glob).
+      printf '%s\n' "$MAP_LINES" \
+        | sudo tee "$SNI_FRAG_DIR/$APPLICATION_NAME.map" >/dev/null
+
+      # Shared skeleton. Idempotent: content is identical regardless of app, so
+      # every project rewriting it is a harmless no-op. The wildcard include
+      # safely matches zero files (valid nginx) before any fragment exists.
+      STREAM_CONF=/etc/nginx/stream.d/postgres.conf
       sudo tee "$STREAM_CONF" >/dev/null <<NGINX
-# Managed by terraform: SNI-based Postgres routing.
+# Managed by terraform: SNI-based Postgres routing (SHARED by all apps).
+# Per-application SNI->backend lines live in pg-sni.d/<app>.map and are pulled
+# in below — do not add host lines to this file directly.
 map \$ssl_preread_server_name \$pg_backend {
     default                       127.0.0.1:1;  # blackhole — unknown SNI
-$MAP_LINES
+    include $SNI_FRAG_DIR/*.map;
 }
 
 server {
@@ -399,9 +422,15 @@ NGINX
   provisioner "local-exec" {
     when        = destroy
     interpreter = ["bash", "-c"]
+    environment = {
+      APPLICATION_NAME = self.triggers.application_name
+    }
     command = <<-EOT
       set -euo pipefail
-      sudo rm -f /etc/nginx/stream.d/postgres.conf
+      # Remove ONLY this app's fragment; the shared skeleton and other apps'
+      # fragments stay intact. The skeleton is intentionally left in place even
+      # when this is the last app — an empty wildcard include is valid nginx.
+      sudo rm -f "/etc/nginx/stream.d/pg-sni.d/$APPLICATION_NAME.map"
       sudo nginx -t && sudo systemctl reload nginx || true
     EOT
   }
